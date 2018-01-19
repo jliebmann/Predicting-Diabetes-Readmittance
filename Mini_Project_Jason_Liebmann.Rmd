@@ -1,0 +1,623 @@
+---
+title: "Predicting readmission probability for diabetes inpatients"
+graphics: yes
+date: 'November 19th, 2017'
+output:
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    self_contained: yes
+    toc: no
+  pdf_document:
+    toc: no
+    toc_depth: 2
+subtitle: STAT 471/571/701, Fall 2017
+author:
+- Jason Liebmann
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{}
+- \fancyfoot[LE,RO]{\thepage}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.height=5, fig.width=11, warning = F, fig.align = "left")
+#knitr::opts_chunk$set(tidy=TRUE, fig.width=6,  fig.height=5, fig.align='left', dev = 'pdf')
+```
+
+```{r, message=FALSE, warning=FALSE}
+#read in packages
+library(dplyr)
+library(car)
+library(ggplot2)
+library(plyr)
+library(caret)
+library(grid)
+library (gridExtra)
+library(glmnet)
+library(tidyverse)
+library(bestglm)
+library(pROC)
+library(ROCR)
+library(randomForest)
+library(tree)
+library(gbm)
+library(caret)
+```
+
+# Executive Summary
+
+**Goal**
+
+The goal of this study has two parts. The first goal is to identify the important factors that help determine the chance of someone being readmitted to the hospital within thirty days. The second goal is to build a model that will predict whether or not a patient will be readmitted within thirty days.
+
+**Background**
+
+Diabetes is a chronic medical condition affecting millions of Americans, but if managed well, with good diet, exercise and medication, patients can lead relatively normal lives. However, if improperly managed, diabetes can lead to patients being continuously admitted and readmitted to hospitals. Readmissions are especially serious - they represent a failure of the health system to provide adequate support to the patient and are extremely costly to the system. As a result, the Centers for Medicare and Medicaid Services announced in 2012 that they would no longer reimburse hospitals for services rendered if a patient was readmitted with complications within 30 days of discharge. Additionally, federal regulations penalize hospitals for an excessive proportion of such readmissions. Therefore, it is now more important that hospital administrators be able to predict whether people will be readmitted within thirty days or not in order to keep costs low for the hospital. The thirty day cutoff for this study may seem trivial and quite short; however, thirty days is considered to be an appropriate time frame because if a patient is readmitted in 30 days, there is a higher likelihood that the patient was readmitted due to inadequate treatment from the hospital the last time the patient was admitted.
+
+**Data**
+
+The original data is from the Center for Clinical and Translational Research at Virginia Commonwealth University. It covers data on diabetes patients across 130 U.S. hospitals during a ten-year period from 1999 to 2008. There are over 100,000 unique hospital admissions in this dataset, from ~70,000 unique patients. All of the observations in the data have a few things in common: they are all hospital admissions, each patient had some form of diabetes, the patient stayed for between 1 and 14 days, the patient had laboratory tests performed on him/her, the patient was given some form of medication during the visit. The data includes demographic elements, such as age, gender, and race, as well as clinical attributes such as tests conducted, emergency/inpatient visits, etc.
+
+**Method**
+
+In order to build an appropriate model for this project, I first had to split the data 80/20 into a training data set and a testing data set. For my first model, I produced a model using backward selection and removed the variables one by one until all the variables that remained were significant at the 0.05 level. Next, I produced a model that cross-validated over alpha and lambda to find a good alpha and lambda, and used these values to create an elastic net model. Third, I used the lasso function to reduce the number of variables I get from backward selection to 5 variables in order to create a more parse model. Fianlly, I used random forest to build another model. I then examined both the in-sample and out-of-sample AUC and misclassification error for each model to compare them and help decide which model to use as my final model.
+
+**Findings**
+
+After using the out-of-sample AUC values, it was determined that the backward selection model would be used as our final model. The number of inpatient visits by the patient in the year prior to the current encounter, where the patient was discharged to after treatment and the primary diagnosis of the patient are the most significant predictors. The backward selection model also tells us that the number of emergency visits by the patient in the year prior to the current encounter, if the metformin medication dosage was changed in any manner during the encounter, if any diabetes medication was prescribed, the age of the patient, and the second and third diagnoses of the patient are also significant predcitors; however, they are not as significant predictors as the ones previously mentioned. The out-of-sample weighted misclassification error for this model is 0.2212942.
+
+**Limitations**
+
+One potential concern about the data is that many of those variables were removed from the data for simplicity. However, had those variables been complete, they may have been significant predictors of people who are readmitted within thirty days. Therefore, the important factors in our analysis may not be the only important factors. Additionally, even though we have a fairly large sample size, there is no guarantee that the final model built will be representative of the truth since it is only 10 years of data. The model we build can only predict off the past, which may not be a perfect predictor for the future, so we should continue to improve the model as time progresses.
+
+## Data Exploration
+
+**Data Summary**
+
+```{r}
+#read in data
+full_data <- read.csv('diabetic.data.csv')
+clean_data <- read.csv('readmission.csv')
+```
+
+```{r, results = 'hide'}
+dim(clean_data) 
+names(clean_data)
+```
+
+The original data is from the Center for Clinical and Translational Research at Virginia Commonwealth University. The cleaned data has 101,766 observations and 31 different variables. The data contains such attributes as patient number, race, gender, age, admission type, time in hospital, medical specialty of admitting physician, number of lab tests performed, diagnosis, number of medications, number of outpatient, inpatient and emergency visits in the year before the hospitalization, etc.
+
+Please refer to the Appendix for an explanation on how the full data set was cleaned as well as a description of the variables in the readmission.csv.
+
+The data set is made up of variables that are either factors or integers, and each column type makes sense for our analysis.
+
+```{r, results='hide'}
+str(clean_data)
+```
+
+There are no missing values in the cleaned data set; however, there are many values labeled with a question mark. The main source of those question mark values are the race and third diagnosis columns. For both of these columns, a question mark is a lgocial entry since the hospital may not have recorded the patients race and the patient may not have had a third diagnosis.
+
+```{r, results='hide'}
+sum(is.na(clean_data))
+sum(clean_data == '?')
+```
+
+In order to deal with these question marks, we revalued the question mark values to missing. Then we also have to regroup our readmitted variable as 1s for when the patient was readmitted within thirty days and 0 for either when the patient was readmitted in longer than thirty days or when the patient was not readmitted. There were 3 observations where the gender of the person was unknown/invalid so we removed those observations from our analysis.
+
+```{r, results='hide'}
+clean_data$diag3_mod <- revalue(clean_data$diag3_mod, c("?" = "missing"))
+clean_data$race <- revalue(clean_data$race, c("?" = "missing"))
+names(clean_data)[length(clean_data)] <- "y" 
+clean_data$y <- as.character(clean_data$y)
+clean_data$y[which(clean_data$y == ">30" | clean_data$y == "NO")] <- "0"
+clean_data$y[which(clean_data$y == "<30")] <- "1"
+clean_data$y <- as.factor(clean_data$y)
+str(clean_data)
+clean_data$gender[which(clean_data$gender == "Unknown/Invalid")]
+which(clean_data$gender == "Unknown/Invalid")
+clean_data <- clean_data[-c(30507, 75552, 82574), ]
+summary(clean_data)
+dim(clean_data)
+```
+
+Finally, we removed the encounter_id variable from the data since if we included it we would lose all of our degrees of freedom since each observation has its own encounter id value. So we have a total of 101763 observations and 30 variables in our cleaned data set.
+
+```{r, results='hide'}
+#take out the columns that are encounter identifiers
+clean_data <- subset(clean_data, select = -c(encounter_id))
+str(clean_data)
+```
+
+In the data, there are many duplicated patient numbers. The data can vary from visit to visit, so we do not have to worry about that skewing the data for most of our variables. However, we could look at age, gender and race to see if the duplicates cause any problems. From examining the plots below, the distribution for each variable do not seem to change drastically from including the duplicate entries. We also see that the data set has a large proportion of caucasian and very few asians, more females than males, and has very few people under 20. Most of the patient's ages range form 20-79; however, there are a good number of patients over 80.
+
+```{r, results = 'hide'}
+clean_data2 <- clean_data[!duplicated(clean_data$patient_nbr), ] 
+p1 <- ggplot(clean_data, aes(x = race)) + geom_bar() +
+     labs(title = "Race Distribution Overall", x = "Race", y = "Count")
+p2 <- ggplot(clean_data2, aes(x = race)) + geom_bar() +
+     labs(title = "Race Distribution without Duplicate", x = "Race", y = "Count")
+p3 <- ggplot(clean_data, aes(x = gender)) + geom_bar() +
+     labs(title = "Gender Distribution Overall", x = "Gender", y = "Count")
+p4 <- ggplot(clean_data2, aes(x = gender)) + geom_bar() +
+     labs(title = "Gender Distribution without Duplicates", x = "Gender", y = "Count")
+p5 <- ggplot(clean_data, aes(x = age_mod)) + geom_bar() +
+     labs(title = "Age Distribution Overall", x = "Age", y = "Count")
+p6 <- ggplot(clean_data2, aes(x = age_mod)) + geom_bar() +
+     labs(title = "Age Distribution without Duplicates", x = "Age", y = "Count")
+grid.arrange(p1, p2, p3, p4, p5, p6, nrow=3)
+```
+
+Below are a few plots of different variables to help us get a sense of the overall data:
+
+Based on the histogram plots below, there is good variation in the length of patient's stay. However, there is not much variation in the number of outpatient or emergency visits in the year prior to the current encounter among the patients in the dataset. There is not much variation in the number of inpatient vists in the year prior to the encounter either, but there is more variation for inpatient visits than for the other two types of visits. Additionally, from the summary of the data we can see that there is not much variation in the max_glu_serum, glimepiride, glyburide, pioglitazone, rosiglitazone variables. However, I do not believe that any of these variables have such little variation that it warrants taking them out of the model.
+
+```{r}
+p7 <- ggplot(clean_data, aes(x = time_in_hospital)) + geom_bar() +
+     labs(title = "Distirbution of Time in Hospital", x = "Time in Hospital", y = "Count")
+p8 <- ggplot(clean_data, aes(x = number_outpatient)) + geom_bar() +
+     labs(title = "Distirbution of Number of Outpatient Visits", x = "Number of Outpatient Visits", y = "Count")
+p9 <- ggplot(clean_data, aes(x = number_inpatient)) + geom_bar() +
+     labs(title = "Distirbution of Number of Inpatient Visits", x = "Number of Inpatient Visits", y = "Count")
+p10 <- ggplot(clean_data, aes(x = number_emergency)) + geom_bar() +
+     labs(title = "Distirbution of Number of Emergency Visits", x = "Number of Emergency Visits", y = "Count")
+grid.arrange(p7, p8, p9, p10, nrow=2)
+```
+
+Additionally, there may be some correlation between the number of outpatient, inpatient and emergency visits the person has had in the past year. Some people may tend to get more sick than others, or some people may feel the need to visit the hospital for small things while others try to avoid visiting the hospital, which may influence their chances of being readmitted within thrity days of treatment. However, what we see from the data is that the more of one type of visit they have, the fewer other types of visits they have per year. This also makes sense since people usually only have a certain number of visits per year, so if they have more emergency visits, they may have fewer other visits. I also created plots to see if the number of inpatient, outpatient or emergency visits varied between those who were readmitted within 30 days and those who were not. Those who were readmitted within 30 days generally have fewer outpatient and emergency visits in the previous year and have a slightly wider spread of inpatient visits; however, the distribution of inpatient visits between the two groups is pretty similar.
+
+```{r}
+p16 <- clean_data %>% ggplot(aes(x = number_outpatient, y = number_inpatient)) + geom_point() + labs(title = "Outpatient vs. Inpatient Visits")
+p17 <- clean_data %>% ggplot(aes(x = number_outpatient, y = number_emergency)) + geom_point() + labs(title = "Outpatient vs. Emergency Visits")
+p18 <- clean_data %>% ggplot(aes(x = number_emergency, y = number_inpatient)) + geom_point() + labs(title = "Emergency vs. Inpatient  Visits")
+p19 <- ggplot(clean_data, aes(x = y,  y = number_outpatient)) + geom_boxplot() + labs(y = "No. of outpatient", x = "readmitted within < 30 days") 
+p20 <- ggplot(clean_data, aes(x = y,  y = number_emergency)) + geom_boxplot() + labs(y = "No. of emergency", x = "readmitted within < 30 days") 
+p21 <- ggplot(clean_data, aes(x = y,  y = number_inpatient)) + geom_boxplot() + labs(y = "No. of inpatient", x = "readmitted within < 30 days") 
+grid.arrange(p16, p17, p18, p19, p20, p21, nrow = 2)
+```
+
+In order to explore the data further, I plotted some more boxplots with differnt variables split by those readmitted within 30 days and those who were not. Based on the plots below, the number of lab procedures, non-lab prodecures, medications and the length of the stay all have similar mean values and spreads for those readmitted within 30 days and those not. However, the number of diagnoses seems to have a higher mean for those readmitted within 30 days than those who are not.
+
+```{r}
+p11 <- ggplot(clean_data, aes(x = y,  y = time_in_hospital)) + geom_boxplot() +
+          labs(y = "length of stay in days", x = "readmitted within < 30 days") 
+p12 <- ggplot(clean_data, aes(x = y,  y = num_lab_procedures)) + geom_boxplot() +
+          labs(y = "Number of lab procedures", x = "readmitted within < 30 days") 
+p13 <- ggplot(clean_data, aes(x = y,  y = num_procedures)) + geom_boxplot() +
+          labs(y = "Number of non-lab procedures", x = "readmitted within < 30 days") 
+p14 <- ggplot(clean_data, aes(x = y,  y = num_medications)) + geom_boxplot() +
+          labs(y = "Nummber of different medications", x = "readmitted within < 30 days") 
+p15 <- ggplot(clean_data, aes(x = y,  y = number_diagnoses)) + geom_boxplot() +
+          labs(y = "Number of diagnosis", x = "readmitted within < 30 days") 
+grid.arrange(p11, p12, p13, p14, p15, nrow = 3)
+```
+
+
+```{r, results='hide'}
+clean_data_only_readmitted <- clean_data[which(clean_data$y == 1), ]
+clean_data_only_non_readmitted <- clean_data[which(clean_data$y == 0), ]
+percent_admitted_0_19 <- sum(clean_data_only_readmitted$age_mod == '0-19')/sum(clean_data$age_mod == '0-19')
+percent_admitted_0_19
+percent_admitted_20_59 <- sum(clean_data_only_readmitted$age_mod == '20-59')/sum(clean_data$age_mod == '20-59')
+percent_admitted_20_59
+percent_admitted_60_79 <- sum(clean_data_only_readmitted$age_mod == '60-79')/sum(clean_data$age_mod == '60-79')
+percent_admitted_60_79
+percent_admitted_80_over <- sum(clean_data_only_readmitted$age_mod == '80+')/sum(clean_data$age_mod == '80+')
+percent_admitted_80_over
+summary(clean_data_only_readmitted$age_mod)
+```
+
+As we can see from the calculations above, the proportion of people readmitted within thirty days is pretty similar for patients over sixty and is even pretty similar for patients over twenty; however, if the patient is not yet twenty, there probability they are readmitted within thirty dats drops off.
+
+All of the variables remaining in the cleaned data set should be considered as input variables except for the patient number, so we have 29 variables for input.
+
+```{r}
+clean_data <- subset(clean_data, select = -c(patient_nbr))
+```
+
+	
+**Analyses**
+
+First, I split the data into a training data set, a tuning dataset and a testing dataset. The tuning dataset is to help me tune my model before runing it on the testing data.
+```{r}
+N <- length(clean_data$race)
+set.seed(234)
+index.train <- sample(N, 0.8*nrow(clean_data))
+data.train <- clean_data[index.train,]
+data.test <- clean_data[-index.train,]
+```
+
+BACKWARD SELECTION:
+
+For my first method, I used backward selection, starting with all 29 variables and excluding the variable with the highest p-value one at a time until all of the remaining variables were significant at the 0.01 level.
+
+```{r, results='hide'}
+fit1 <- glm(y~. , data.train, family = "binomial")
+fit1.1 <- update(fit1, .~. - rosiglitazone)
+fit1.2 <- update(fit1.1, .~. - num_lab_procedures)
+fit1.3 <- update(fit1.2, .~. - glyburide)
+fit1.4 <- update(fit1.3, .~. - adm_typ_mod)
+fit1.5 <- update(fit1.4, .~. - glimepiride)
+fit1.6 <- update(fit1.5, .~. - race)
+fit1.7 <- update(fit1.6, .~. - max_glu_serum)
+fit1.8 <- update(fit1.7, .~. - number_outpatient)
+fit1.9 <- update(fit1.8, .~. - gender)
+fit1.10 <- update(fit1.9, .~. - pioglitazone)
+fit1.11 <- update(fit1.10, .~. - glipizide)
+fit1.12 <- update(fit1.11, .~. - number_diagnoses)
+fit1.13 <- update(fit1.12, .~. - change)
+Anova(fit1.13)
+```
+
+```{r}
+subset1 <- subset(data.train, select = -c(rosiglitazone, num_lab_procedures, glyburide, adm_typ_mod, glimepiride, race, max_glu_serum, number_outpatient, gender, pioglitazone, glipizide, number_diagnoses, change))
+Model1 <- glm(y ~. , subset1, family = "binomial")
+```
+
+```{r}
+subset1.test <- subset(data.test, select = -c(rosiglitazone, num_lab_procedures, glyburide, adm_typ_mod, glimepiride, race, max_glu_serum, number_outpatient, gender, pioglitazone, glipizide, number_diagnoses, change))
+Model1.test <- predict(Model1, subset1.test, type="response")
+```
+
+LASSO:
+
+I will now use lasso and backward selection to build a model. I will cross-validatae between alpha and lambda and then use those values to build a model. I run it once for each alpha to help reduce the computational time for the loop.
+
+```{r}
+X <- model.matrix(y ~ . , data = data.train)[, -1]
+Y <- data.train$y
+```
+
+```{r}
+set.seed(20)
+N <- 1
+fold <- 10
+level <- seq(0, 1, by = 0.1)
+cvm = array(dim = c(length(level), N))
+lambda = array(dim = c(length(level), N))
+coefnum = array(dim = c(length(level), N))
+for (i in level){
+  for (j in 1:N){
+    lambdaCV <- cv.glmnet(X, Y, family = "binomial", alpha = i, nfolds = fold) 
+    mincvm <- lambdaCV$cvm[which(lambdaCV$lambda == lambdaCV$lambda.min)]
+    lambdaSelect <- lambdaCV$lambda.min
+    cvm[which(level == i), j] <- mincvm
+    lambda[which(level == i), j] <- lambdaSelect
+    coefnum[which(level == i), j] <- sum(coef(lambdaCV, s = "lambda.min") != 0)
+  }
+}
+df_par <- data.frame(cvm = as.vector(cvm) , lambda = as.vector(lambda), alpha = rep(level, N), coef_num = as.vector(coefnum))
+p22 <- ggplot(df_par , aes(as.factor(alpha), cvm)) + geom_point() + labs(x = "alpha", y = "CV error")
+p23 <- ggplot(df_par , aes(as.factor(alpha), coef_num)) + geom_point() + labs(x = "alpha", y = "# coefficient")
+p24 <- ggplot(df_par , aes(as.factor(alpha), lambda)) + geom_point() + labs(x = "alpha")
+grid.arrange(p22, p23, p24, ncol = 1)
+```
+
+Based on the graphs generated above, it seems that the optimal alpha level is near 0.4 since it has a pretty good error and few variables in the model.
+
+From the graphs below, we can see that the misclassification error grows and that the mean cv errors cannot be imporved by increasing lambda past lambda.min. Also, we see that as lambda increases the number of non-zero coefficients decreases.
+
+```{r}
+set.seed(50)
+lambdaCV <- cv.glmnet(X, Y, alpha = 0.4, family = "binomial", nfolds = 10)
+outputCV <- data.frame(lambda = lambdaCV$lambda, cvm = lambdaCV$cvm, nzero = lambdaCV$nzero)
+plotCV <- function(input) {
+  p25 <- ggplot(input, aes(lambda, cvm)) + geom_point() + labs(y = "mean cv errors") 
+  p26 <- ggplot(input, aes(lambda, nzero)) + geom_point() + labs(y = "number of non-zeros")
+  grid.arrange(p25, p26, ncol = 2)
+}
+plotCV(outputCV)
+```
+
+```{r Choose Lambda, fig.height=3, fig.width=12}
+plot(lambdaCV)
+```
+
+```{r, results='hide'}
+best.lambda <- lambdaCV$lambda.1se
+best.model <- glmnet(X, Y, family = "binomial", alpha = 0.4, lambda = best.lambda)
+names(best.model)
+best.model$beta
+subset2 <- subset(data.train, select = c(time_in_hospital, num_medications, number_emergency, number_inpatient, number_diagnoses, A1Cresult, metformin, insulin, diabetesMed, disch_disp_modified, adm_typ_mod, diag1_mod, diag3_mod, y))
+fit2 <- glm(y ~. , family = "binomial", subset2)
+```
+
+Now I will use backward selection to reduce the number of models to make sure all of the remianing variables are significant.
+
+```{r, results='hide'}
+fit2.1 <- update(fit2, .~. - adm_typ_mod)
+fit2.2 <- update(fit2.1, .~. - num_medications)
+Anova(fit2.2)
+```
+```{r}
+subset2.1 <- subset(data.train, select = c(time_in_hospital, number_emergency, number_inpatient, number_diagnoses, A1Cresult, metformin, insulin, diabetesMed, disch_disp_modified, diag1_mod, diag3_mod, y))
+Model2 <- glm(y ~. , family = "binomial", subset2.1)
+subset2.1.test <- subset(data.test, select = c(time_in_hospital, number_emergency, number_inpatient, number_diagnoses, A1Cresult, metformin, insulin, diabetesMed, disch_disp_modified, diag1_mod, diag3_mod, y))
+Model2.test <- predict(Model2, subset2.1.test, type="response")
+```
+
+Next, I will try to reduce the number of variables in my backward selection model by using LASSO to create another model.
+
+```{r, results='hide'}
+set.seed(50)
+X2 <- model.matrix(y ~., subset1)
+lambdaCV2 <- cv.glmnet(X2, Y, alpha = 1, family = "binomial")
+plot(lambdaCV2)
+selected.lambda <- lambdaCV2$lambda.1se  #[which(lambdaCV2$nzero == 5)][1]
+best.model2 <- glmnet(X2, Y, family = "binomial", alpha = 1, lambda = selected.lambda)
+select.coef <- coef(best.model2, s = selected.lambda) 
+select.coef <- select.coef[which(select.coef != 0), ]
+list(vars = names(select.coef)[-1], coefficients = select.coef[-1])
+subset3 <- subset(data.train, select = c(time_in_hospital, num_medications, number_emergency, number_inpatient, A1Cresult, metformin, insulin, diabetesMed, disch_disp_modified, age_mod, diag1_mod, diag2_mod, diag3_mod, y))
+fit3 <- glm(y ~. , family = "binomial", subset3)
+```
+
+I will now run an Anova test on model 3 to make sure all of the predictors on the reduced model are significant.
+
+```{r,results='hide'}
+fit3.1 <- update(fit3, .~. - time_in_hospital)
+Anova(fit3.1)
+```
+
+```{r}
+subset3.1 <- subset(data.train, select = c(num_medications, number_emergency, number_inpatient, A1Cresult, metformin, insulin, diabetesMed, disch_disp_modified, age_mod, diag1_mod, diag2_mod, diag3_mod, y))
+Model3 <- glm(y ~. , family = "binomial", subset3.1)
+subset3.1.test <- subset(data.test, select = c(num_medications, number_emergency, number_inpatient, A1Cresult, metformin, insulin, diabetesMed, disch_disp_modified, age_mod, diag1_mod, diag2_mod, diag3_mod, y))
+Model3.test <- predict(Model3, subset3.1.test, type="response")
+```
+
+RANDOM FOREST MODEL:
+
+For my next model, I will use random forest and will set mtry at 5.
+
+```{r}
+set.seed(50)
+fit.rf <- randomForest(y~., data.train, mtry=5, ntree=100)
+plot(fit.rf)
+```
+
+
+**Comparisons among various models**
+
+We can try to differentiate between the three models by looking at the misclassification error. For this analysis, we will assume that it costs twice as much to mislabel a readmission than it does to label a non-readmission. Therefore, we will assign values of 1 to the observations using a threshold of 1/3.
+
+Below I calculate the in-sample misclassification error for the various models:
+
+Model 1:
+
+```{r, results='hide'}
+Model1.pred.train <- predict(Model1, data.train,  type="response")
+Model1.pred.train <- ifelse(Model1.pred.train>1/3, 1, 0)
+cm1.train <- table(Model1.pred.train, data.train$y) 
+cm1.train
+```
+
+```{r}
+WeightedMCE.bayes1.train=(2*(sum(Model1.pred.train[data.train$y == "1"] != "1")) 
+            + sum(Model1.pred.train[data.train$y == "0"] != "0"))/length(data.train$y)
+WeightedMCE.bayes1.train
+```
+
+Model 2:
+
+```{r, results='hide'}
+Model2.pred.train <- predict(Model2, data.train,  type="response")
+Model2.pred.train <- ifelse(Model2.pred.train>1/3, 1, 0)
+cm2.train <- table(Model2.pred.train, data.train$y) 
+cm2.train
+```
+
+```{r}
+WeightedMCE.bayes2.train=(2*(sum(Model2.pred.train[data.train$y == "1"] != "1")) 
+            + sum(Model2.pred.train[data.train$y == "0"] != "0"))/length(data.train$y)
+WeightedMCE.bayes2.train
+```
+
+Model 3:
+
+```{r,results='hide'}
+Model3.pred.train <- predict(Model3, data.train,  type="response")
+Model3.pred.train <- ifelse(Model3.pred.train>1/3, 1, 0)
+cm3.train <- table(Model3.pred.train, data.train$y) 
+cm3.train
+```
+
+```{r}
+WeightedMCE.bayes3.train=(2*(sum(Model3.pred.train[data.train$y == "1"] != "1")) 
+            + sum(Model3.pred.train[data.train$y == "0"] != "0"))/length(data.train$y)
+WeightedMCE.bayes3.train
+```
+
+Random Forest Model:
+
+```{r}
+rf.pred <- predict(fit.rf, data=data.train, type="prob") 
+rf.pred.y <- predict(fit.rf, data = data.train, type = "response")
+WeightedMCE.bayes4.train=(2*(sum(rf.pred.y[data.train$y == "1"] != "1")) 
+            + sum(rf.pred.y[data.train$y == "0"] != "0"))/length(data.train$y)
+WeightedMCE.bayes4.train
+```
+
+Below I calculate the out-of-sample misclassification error for the various models:
+
+Model 1:
+
+```{r, results='hide'}
+Model1.pred <- predict(Model1, data.test,  type="response")
+Model1.pred <- ifelse(Model1.pred>1/3, 1, 0)
+cm1 <- table(Model1.pred, data.test$y) 
+cm1
+```
+
+```{r}
+WeightedMCE.bayes1=(2*(sum(Model1.pred[data.test$y == "1"] != "1")) 
+            + sum(Model1.pred[data.test$y == "0"] != "0"))/length(data.test$y)
+WeightedMCE.bayes1
+```
+
+Model 2:
+
+```{r, results='hide'}
+Model2.pred <- predict(Model2, data.test,  type="response")
+Model2.pred <- ifelse(Model2.pred>1/3, 1, 0)
+cm2 <- table(Model2.pred, data.test$y) 
+cm2
+```
+
+```{r}
+WeightedMCE.bayes2=(2*(sum(Model2.pred[data.test$y == "1"] != "1")) 
+            + sum(Model2.pred[data.test$y == "0"] != "0"))/length(data.test$y)
+WeightedMCE.bayes2
+```
+
+Model 3:
+
+```{r, results='hide'}
+Model3.pred <- predict(Model3, data.test,  type="response")
+Model3.pred <- ifelse(Model3.pred>1/3, 1, 0)
+cm3 <- table(Model3.pred, data.test$y)
+cm3
+```
+
+
+```{r}
+WeightedMCE.bayes3=(2*(sum(Model3.pred[data.test$y == "1"] != "1")) 
+            + sum(Model3.pred[data.test$y == "0"] != "0"))/length(data.test$y)
+WeightedMCE.bayes3
+```
+
+Random Forest Model:
+
+```{r}
+rf.pred.test <- predict(fit.rf, newdata = data.test, type="prob") 
+rf.pred.y.test <- predict(fit.rf, newdata = data.test, type = "response")
+WeightedMCE.bayes4=(2*(sum(rf.pred.y.test[data.test$y == "1"] != "1")) 
+            + sum(rf.pred.y.test[data.test$y == "0"] != "0"))/length(data.test$y)
+WeightedMCE.bayes4
+```
+
+Below I created all of the ROC curves for the different models in order to compare their AUC for in-sample and out-of-sample data:
+
+```{r}
+#create in-sample ROC curves
+Model1.roc <- roc(data.train$y, Model1$fitted, col='red')
+Model2.roc <- roc(data.train$y, Model2$fitted, col = 'blue')
+Model3.roc <- roc(data.train$y, Model3$fitted, col = 'green')
+rf.train.roc <- roc(data.train$y, rf.pred[,2])
+```
+
+```{r}
+#plot in-sample ROC curves
+plot(1-Model1.roc$specificities, Model1.roc$sensitivities, col="red", pch=16, cex=.2, xlab="False Positive", 
+     ylab="Sensitivity")
+lines(1-Model2.roc$specificities, Model2.roc$sensitivities, col="blue", pch=16, cex=.6)
+lines(1-Model3.roc$specificities, Model3.roc$sensitivities, col="green", pch=16, cex=.6)
+lines(1-rf.train.roc$specificities, rf.train.roc$sensitivities, col="purple", pch=16, cex=.6)
+title("Comparison of in-sample ROC curves for the models")
+legend("topleft", legend = c("Random Forest", "Model3", "Model2","Model1"), lty=c(1,1),lwd = 4,col = c("purple", "green", "blue","red"))
+```
+Model 1, 2 and 3 have the best in-sample ROCs followed by the Random Forest model.
+
+The AUC values for each of the curves is displayed below in this respective order: Model1, Model2, Model3, and then Random Forest.
+
+```{r}
+auc(Model1.roc)
+auc(Model2.roc)
+auc(Model3.roc)
+auc(rf.train.roc)
+```
+
+```{r}
+#create out-of-sample ROC curves
+Model1.roc.test <- roc(data.test$y, Model1.test, col='red')
+Model2.roc.test <- roc(data.test$y, Model2.test, col = 'blue')
+Model3.roc.test <- roc(data.test$y, Model3.test, col = 'green')
+rf.roc.test <- roc(data.test$y, rf.pred.test[,2])
+```
+
+```{r}
+#plot out-of-sample ROC curves
+plot(1-Model1.roc.test$specificities, Model1.roc.test$sensitivities, col="red", pch=16, cex=.2, 
+     xlab="False Positive", 
+     ylab="Sensitivity")
+lines(1-Model2.roc.test$specificities, Model2.roc.test$sensitivities, col="blue", pch=16, cex=.6)
+lines(1-Model3.roc.test$specificities, Model3.roc.test$sensitivities, col="green", pch=16, cex=.6)
+lines(1-rf.roc.test$specificities, rf.roc.test$sensitivities, col="purple", pch=16, cex=.6)
+title("Comparison of out-of-sample ROC curves for the models")
+legend("topleft", legend = c("Random Forest", "Model3", "Model2","Model1"), lty=c(1,1),lwd = 4,col = c("purple", "green", "blue","red"))
+```
+The ROC curve for Model 1 and Model 3 seem pretty similar, but the ROC curve for Model 1 looks to be slightly better. The ROC curve for Model2 is third-best and the ROC curve for the random forest model is the worst.
+
+The AUC values for each of the curves is displayed below in this respective order: Model1, Model2, Model3 and then Random Forest.
+
+```{r}
+auc(Model1.roc.test)
+auc(Model2.roc.test)
+auc(Model3.roc.test)
+auc(rf.roc.test)
+```
+
+All of the models have comparable in-sample and out-of-sample weighted misclassification errors, so I will use the ROC curves to determine which model to use. Based on the analysis done above, the model with the highest out-of-sample AUC is Model1 so I will choose that model as my best model.
+
+```{r, results='hide'}
+#find which variables are important in Model1
+Anova(Model1)
+```
+
+Based on the summary for Model1, we can see that the number of inpatient visits by the patient in the year prior to the current encounter, where the patient was discharged to after treatment and the primary diagnosis of the patient are the most significant predictors when trying to predict patients who will be readmitted within 30 days. Model1 also tells us that the number of emergency visits by the patient in the year prior to the current encounter, if the metformin medication dosage was changed in any manner during the encounter, if any diabetes medication was prescribed, the age of the patient, and the second and third diagnoses are also significant predcitors when trying to predict patients who will be readmitted within 30 days; however, they are not as significant predictors as the ones previously mentioned. The out-of-sample weighted misclassification error for this model is 0.2212942.
+
+One potential concern about the data is that many of those variables were removed from the data for simplicity. However, had those variables been complete, they may have been significant predictors of people who are readmitted within thirty days. Therefore, the important factors in Model1 may not be the only important factors. Additionally, even though we have a fairly large sample size, the final model may not be the truth since we only have 10 years of data so we should continue to improve the model as time progresses.
+
+# Appendix
+
+Here is a description of a difference between the full data set (diabetic.data.csv) and the cleaned data set we began with in this analysis (readmission.csv):
+
+We are using a simplified version (readmission.csv) of the full data (diabetic.data.csv) for our analysis that reduces the number of variables from around 50 to 31. Some of the cleaning done to produce readmission.csv is included below:
+
+Payer code, weight and Medical Specialty are not included since they have a large number of missing values.
+
+Variables such as acetohexamide, glimepiride.pioglitazone, metformin.rosiglitazone, metformin.pioglitazone have little variability, and are as such excluded. This also includes the following variables: chlorpropamide, acetohexamide, tolbutamide,  acarbose, miglitor, troglitazone, tolazamide, examide, citoglipton, glyburide.metformin, glipizide.metformin, and  glimepiride.pioglitazone.
+
+Some categorical variables have been regrouped. For example, Diag1_mod keeps some original levels with large number of patients and aggregates other patients as others. This process is known as ‘binning.’
+
+Here are descriptions of all the variables in readmission.csv:
+
+a) Patient identifiers:
+a. encounter_id: unique identifier for each admission b. patient_nbr: unique identifier for each patient
+
+b) Patient Demographics:
+race, age, gender, weight cover the basic demographic information associated with each patient. Payer_code is an additional variable that identifies which health insurance (Medicare /Medicaid / Commercial) the patient holds.
+
+c) Admission and discharge details:
+a. admission_source_id and admission_type_id identify who referred the patient to the hospital (e.g. physician vs. emergency dept.) and what type of admission this was (Emergency vs. Elective vs. Urgent).
+b. discharge_disposition_id indicates where the patient was discharged to after treatment. 
+
+d) Patient MedicalHistory:
+a. num_outpatient: number of outpatient visits by the patient in the year prior to the current encounter 
+b. num_inpatient: number of inpatient visits by the patient in the year prior to the current encounter
+c. num_emergency: number of emergency visits by the patient in the year prior to the current encounter 
+
+e) Patient admission details:
+a. medical_specialty: the specialty of the physician admitting the patient
+b. diag_1, diag_2, diag_3: ICD9 codes for the primary, secondary and tertiary diagnoses of the patient.
+ICD9 are the universal codes that all physicians use to record diagnoses. There are various easy to use
+tools to lookup what individual codes mean (Wikipedia is pretty decent on its own)
+c. time_in_hospital: the patient’s length of stay in the hospital (in days)
+d. number_diagnoses: Total no. of diagnosis entered for the patient
+e. num_lab_procedures: No. of lab procedures performed in the current encounter
+f. num_procedures: No. of non-lab procedures performed in the current encounter
+g. num_medications: No. of distinct medications prescribed in the current encounter
+
+f) Clinical Results:
+a. max_glu_serum: indicates results of the glucose serum test 
+b. A1Cresult: indicates results of the A1c test
+
+g) Medication Details:
+a. diabetesMed: indicates if any diabetes medication was prescribed
+b. change: indicates if there was a change in diabetes medication
+c. 24 medication variables: indicate whether the dosage of the medicines was changed in any manner during the encounter
+
+h) Readmission indicator:
+Indicates whether a patient was readmitted after a particular admission. There are 3 levels for this variable: “NO” = no readmission, “< 30” = readmission within 30 days and “> 30” = readmission after more than 30 days. The 30 day distinction is of practical importance to hospitals because federal regulations penalize
+hospitals for an excessive proportion of such readmissions.
